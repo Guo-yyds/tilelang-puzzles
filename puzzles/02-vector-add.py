@@ -105,7 +105,10 @@ def tl_mul_relu_1d(A, B, BLOCK_N: int):
     B: T.Tensor((N,), T.float16)
     C = T.empty((N,), T.float16)
 
-    # TODO: Implement this function
+    with T.Kernel(N // BLOCK_N, threads = 256) as bx:
+        idx = bx * BLOCK_N
+        for i in T.Parallel(BLOCK_N):
+            C[idx + i] = T.max(0, A[idx + i] * B[idx + i])
 
     return C
 
@@ -168,7 +171,19 @@ def tl_mul_relu_1d_mem(A, B, BLOCK_N: int):
     B: T.Tensor((N,), dtype)
     C = T.empty((N,), dtype)
 
-    # TODO: Implement this function
+    with T.Kernel(N // BLOCK_N, threads = 256) as bx:
+        block_start = bx * BLOCK_N
+        A_local = T.alloc_fragment((BLOCK_N,), dtype)
+        B_local = T.alloc_fragment((BLOCK_N,), dtype)
+        C_local = T.alloc_fragment((BLOCK_N,), dtype)
+
+        T.copy(A[block_start], A_local)
+        T.copy(B[block_start], B_local)
+        # T.empty(C_local)
+
+        for i in T.Parallel(BLOCK_N):
+            C_local[i] = T.max(0, A_local[i] * B_local[i])
+        T.copy(C_local, C[block_start])
 
     return C
 
@@ -178,13 +193,13 @@ def run_mul_relu_1d_mem():
     N = 1024 * 4096
     BLOCK_N = 1024
 
-    print("Naive TL Implementation: ")
-    tl_mul_relu_kernel = tl_mul_relu_1d.compile(N=N, BLOCK_N=BLOCK_N)
-    tl_mul_relu_kernel.print_source_code()
+    # print("Naive TL Implementation: ")
+    # tl_mul_relu_kernel = tl_mul_relu_1d.compile(N=N, BLOCK_N=BLOCK_N)
+    # tl_mul_relu_kernel.print_source_code()
 
-    print("Optimized Version")
-    tl_mul_relu_kernel_opt = tl_mul_relu_1d_mem.compile(N=N, BLOCK_N=BLOCK_N)
-    tl_mul_relu_kernel_opt.print_source_code()
+    # print("Optimized Version")
+    # tl_mul_relu_kernel_opt = tl_mul_relu_1d_mem.compile(N=N, BLOCK_N=BLOCK_N)
+    # tl_mul_relu_kernel_opt.print_source_code()
 
     test_puzzle(tl_mul_relu_1d_mem, ref_mul_relu_1d, {"N": N, "BLOCK_N": BLOCK_N})
     bench_puzzle(
