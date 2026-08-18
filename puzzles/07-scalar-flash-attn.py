@@ -81,7 +81,56 @@ def tl_scalar_flash_attn(Q, K, V, BLOCK_B: int, BLOCK_S: int):
     V: T.Tensor((B, S), dtype)
     O = T.empty((B, S), dtype)
 
-    # TODO: Implement this function
+    with T.Kernel(B // BLOCK_B, threads=256) as bx:
+        Q_local = T.alloc_fragment((BLOCK_B, BLOCK_S), dtype)
+        K_local = T.alloc_fragment((BLOCK_B, BLOCK_S), dtype)
+        QK_local = T.alloc_fragment((BLOCK_B, BLOCK_S), dtype)
+        QK_max_local = T.alloc_fragment((BLOCK_B,), dtype)
+        T.fill(QK_max_local, -T.infinity(dtype))
+
+        QK_exp_local = T.alloc_fragment((BLOCK_B, BLOCK_S), dtype)
+        QK_exp_sum_local = T.alloc_fragment((BLOCK_B,), dtype)
+        T.clear(QK_exp_sum_local)
+
+        V_local = T.alloc_fragment((BLOCK_B, BLOCK_S), dtype)
+
+        d_global = T.alloc_fragment((BLOCK_B,), dtype)
+        m_global = T.alloc_fragment((BLOCK_B,), dtype)
+        T.fill(m_global, -T.infinity(dtype))
+        T.clear(d_global)
+
+        for j in T.Serial(S // BLOCK_S):
+            T.copy(Q[bx * BLOCK_B, j * BLOCK_S], Q_local)
+            T.copy(K[bx * BLOCK_B, j * BLOCK_S], K_local)
+            for x, y in T.Parallel(BLOCK_B, BLOCK_S):
+                QK_local[x, y] = Q_local[x, y] * K_local[x, y]
+
+            # softmax
+            T.reduce_max(QK_local, QK_max_local)
+            for x in T.Parallel(BLOCK_B):
+                pre_m = m_global[x]
+                m_global[x] = T.max(m_global[x], QK_max_local[x])
+                d_global[x] = d_global[x] * T.exp(pre_m - m_global[x])
+
+            for x, y in T.Parallel(BLOCK_B, BLOCK_S):
+                QK_exp_local[x, y] = T.exp(QK_local[x, y] - m_global[x])
+            T.reduce_sum(QK_exp_local, QK_exp_sum_local)
+
+            for x in T.Parallel(BLOCK_B):
+                d_global[x] += QK_exp_sum_local[x]
+
+        for j in T.Serial(S // BLOCK_S):
+            T.copy(Q[bx * BLOCK_B, j * BLOCK_S], Q_local)
+            T.copy(K[bx * BLOCK_B, j * BLOCK_S], K_local)
+            for x, y in T.Parallel(BLOCK_B, BLOCK_S):
+                QK_local[x, y] = Q_local[x, y] * K_local[x, y]
+
+            T.copy(V[bx * BLOCK_B, j * BLOCK_S], V_local)
+            for x, y in T.Parallel(BLOCK_B, BLOCK_S):
+                V_local[x, y] = V_local[x, y] * T.Div(
+                    T.exp(QK_local[x, y] - m_global[x]), d_global[x]
+                )
+            T.copy(V_local, O[bx * BLOCK_B, j * BLOCK_S])
 
     return O
 
