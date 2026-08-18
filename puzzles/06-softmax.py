@@ -83,7 +83,89 @@ def tl_softmax(A, BLOCK_N: int, BLOCK_M: int):
     A: T.Tensor((N, M), dtype)
     B = T.empty((N, M), dtype)
 
-    # TODO: Implement this function
+    with T.Kernel(N // BLOCK_N, threads=256) as bx:
+        A_local = T.alloc_fragment((BLOCK_N, BLOCK_M), dtype)
+        A_max_local = T.alloc_fragment((BLOCK_N,), dtype)
+
+        T.fill(A_max_local, -T.infinity(dtype))
+
+        x_start = bx * BLOCK_N
+        # max
+        for i in T.Serial(M // BLOCK_M):
+            T.copy(A[x_start, i * BLOCK_M], A_local)
+            T.reduce_max(A_local, A_max_local, clear = False)
+
+        # sum exp
+        A_exp_local = T.alloc_fragment((BLOCK_N, BLOCK_M), dtype)
+        A_sum_local = T.alloc_fragment((BLOCK_N,), dtype)
+        T.clear(A_sum_local)
+
+        for i in T.Serial(M // BLOCK_M):
+            T.copy(A[x_start, i * BLOCK_M], A_local)
+            for x, y in T.Parallel(BLOCK_N, BLOCK_M):
+                A_exp_local[x, y] = T.exp(A_local[x, y] - A_max_local[x])
+            T.reduce_sum(A_exp_local, A_sum_local, clear = False)
+
+        # div
+        for i in T.Serial(M // BLOCK_M):
+            T.copy(A[x_start, i * BLOCK_M], A_local)
+            for x, y in T.Parallel(BLOCK_N, BLOCK_M):
+                A_local[x, y] = T.Div(
+                    T.exp(A_local[x, y] - A_max_local[x]), A_sum_local[x]
+                )
+            T.copy(A_local, B[x_start, i * BLOCK_M])
+
+    return B
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+    },
+)
+def tl_softmax_online(A, BLOCK_N: int, BLOCK_M: int):
+    log2_e = 1.44269504
+    N, M = T.const("N, M")
+    dtype = T.float32
+    A: T.Tensor((N, M), dtype)
+    B = T.empty((N, M), dtype)
+
+    with T.Kernel(N // BLOCK_N, threads=256) as bx:
+        A_local = T.alloc_fragment((BLOCK_N, BLOCK_M), dtype)
+        A_max_local = T.alloc_fragment((BLOCK_N,), dtype)
+        A_exp_local = T.alloc_fragment((BLOCK_N, BLOCK_M), dtype)
+        A_exp_sum_local = T.alloc_fragment((BLOCK_N,), dtype)
+
+
+        # 全局最大值
+        m_global = T.alloc_fragment((BLOCK_N,), dtype)
+        T.fill(m_global, -T.infinity(dtype))
+        # 全局和
+        d_global = T.alloc_fragment((BLOCK_N,), dtype)
+        T.clear(d_global)
+
+        for i in T.Serial(M // BLOCK_M):
+            T.copy(A[bx * BLOCK_N, i * BLOCK_M], A_local)
+            T.reduce_max(A_local, A_max_local, clear = True)
+
+            for x in T.Parallel(N // BLOCK_N):
+                m_prev = m_global[x]
+                m_global[x] = T.max(m_global[x], A_max_local[x])
+                d_global[x] = d_global[x] * T.exp(m_prev - m_global[x])
+
+            for x, y in T.Parallel(BLOCK_N, BLOCK_M):
+                A_exp_local[x, y] = T.exp(A_local[x, y] - m_global[x])
+            T.reduce_sum(A_exp_local, A_exp_sum_local, clear = True)
+
+            for x in T.Parallel(N // BLOCK_N):
+                d_global[x] = d_global[x] + A_exp_sum_local[x]
+
+        for i in T.Serial(M // BLOCK_M):
+            T.copy(A[bx * BLOCK_N, i * BLOCK_M], A_local)
+            for x, y in T.Parallel(BLOCK_N, BLOCK_M):
+                A_local[x, y] = T.exp(A_local[x, y] - m_global[x]) / d_global[x]
+            T.copy(A_local, B[bx * BLOCK_N, i * BLOCK_M])
 
     return B
 
@@ -92,6 +174,8 @@ def run_softmax():
     print("\n=== Softmax ===\n")
     N = 4096
     M = 16384
+    # N = 16
+    # M = 256
     BLOCK_N = 16
     BLOCK_M = 256
     test_puzzle(
@@ -101,6 +185,17 @@ def run_softmax():
     )
     bench_puzzle(
         tl_softmax,
+        ref_softmax,
+        {"N": N, "M": M, "BLOCK_N": BLOCK_N, "BLOCK_M": BLOCK_M},
+        bench_torch=True,
+    )
+    test_puzzle(
+        tl_softmax_online,
+        ref_softmax,
+        {"N": N, "M": M, "BLOCK_N": BLOCK_N, "BLOCK_M": BLOCK_M},
+    )
+    bench_puzzle(
+        tl_softmax_online,
         ref_softmax,
         {"N": N, "M": M, "BLOCK_N": BLOCK_N, "BLOCK_M": BLOCK_M},
         bench_torch=True,
