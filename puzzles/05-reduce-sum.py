@@ -63,7 +63,19 @@ def tl_reduce_sum(A, BLOCK_N: int, BLOCK_M: int):
     A: T.Tensor((N, M), dtype)
     B = T.empty((N,), dtype)
 
-    # TODO: Implement this function
+    with T.Kernel(N // BLOCK_N, threads = 256) as bx:
+        A_local = T.alloc_shared((BLOCK_N, BLOCK_M), dtype)
+        B_local = T.alloc_fragment((BLOCK_N), dtype)
+
+        # 如果不写，结果是错误的
+        T.clear(B_local)
+
+        x_start = bx * BLOCK_N
+        for by in T.Serial(M // BLOCK_M):
+            y_start = by * BLOCK_M
+            T.copy(A[x_start, y_start], A_local)
+            T.reduce_sum(A_local, B_local, clear=False)
+        T.copy(B_local, B[x_start])
 
     return B
 
@@ -74,6 +86,9 @@ def run_reduce_sum():
     M = 16384
     BLOCK_N = 16
     BLOCK_M = 128
+    # 调用 tl::reduce 库，没具体跟踪下去
+    # kernel = tl_reduce_sum.compile(N=N, M=M, BLOCK_N=BLOCK_N, BLOCK_M=BLOCK_M)
+    # kernel.print_source_code()
     test_puzzle(
         tl_reduce_sum,
         ref_reduce_sum,
