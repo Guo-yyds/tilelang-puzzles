@@ -54,7 +54,17 @@ def tl_mul_relu_bcast(A, B, BLOCK_N: int, BLOCK_M: int):
     B: T.Tensor((M,), dtype)
     C = T.empty((N, M), dtype)
 
-    # TODO: Implement this function
+    with T.Kernel(N // BLOCK_N, M // BLOCK_M, threads = 256) as (bx, by):
+        A_local = T.alloc_fragment((BLOCK_N, BLOCK_M), dtype)
+        B_local = T.alloc_fragment((BLOCK_M,), dtype)
+        C_local = T.alloc_fragment((BLOCK_N, BLOCK_M), dtype)
+
+        T.copy(A[bx * BLOCK_N, by * BLOCK_M], A_local)
+        T.copy(B[by * BLOCK_M], B_local)
+
+        for i, j in T.Parallel(BLOCK_N, BLOCK_M):
+            C_local[i, j] = T.max(0, A_local[i, j] * B_local[j])
+        T.copy(C_local, C[bx * BLOCK_N, by * BLOCK_M])
 
     return C
 
@@ -128,7 +138,21 @@ def tl_mul_relu_bwd(A, B, dC, BLOCK_N: int, BLOCK_M: int):
     dC: T.Tensor((N, M), dtype)
     dA = T.empty((N, M), dtype)
 
-    # TODO: Implement this function
+    with T.Kernel(N // BLOCK_N, M // BLOCK_M, threads = 256) as (bx, by):
+        A_local = T.alloc_fragment((BLOCK_N, BLOCK_M), dtype)
+        B_local = T.alloc_fragment((BLOCK_M), dtype)
+        dC_local = T.alloc_fragment((BLOCK_N, BLOCK_M), dtype)
+        dA_local = T.alloc_fragment((BLOCK_N, BLOCK_M), dtype)
+
+        x_start = bx * BLOCK_N
+        y_start = by * BLOCK_M
+        T.copy(A[x_start, y_start], A_local)
+        T.copy(B[y_start], B_local)
+        T.copy(dC[x_start, y_start], dC_local)
+
+        for i, j in T.Parallel(BLOCK_N, BLOCK_M):
+            dA_local[i,j] = dC_local[i, j] * B_local[j] * (A_local[i, j] * B_local[j] > 0)
+        T.copy(dA_local, dA[x_start, y_start])
 
     return dA
 
