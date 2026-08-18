@@ -57,7 +57,20 @@ def tl_outer_add(A, B, BLOCK_N: int, BLOCK_M: int):
     B: T.Tensor((M,), dtype)
     C = T.empty((N, M), dtype)
 
-    # TODO: Implement this function
+    with T.Kernel(N // BLOCK_N, M // BLOCK_M, threads = 256) as (bx, by):
+        x_start = bx * BLOCK_N
+        y_start = by * BLOCK_M
+
+        A_local = T.alloc_fragment((BLOCK_N,), dtype)
+        B_local = T.alloc_fragment((BLOCK_M,), dtype)
+        C_local = T.alloc_fragment((BLOCK_N, BLOCK_M), dtype)
+
+        T.copy(A[x_start], A_local)
+        T.copy(B[y_start], B_local)
+
+        for i,j in T.Parallel(BLOCK_N, BLOCK_M):
+            C_local[i, j] = T.Add(A_local[i], B_local[j])
+        T.copy(C_local, C[x_start, y_start])
 
     return C
 
